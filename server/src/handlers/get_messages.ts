@@ -1,29 +1,62 @@
+import { db } from '../db';
+import { conversationsTable, messagesTable } from '../db/schema';
 import { type GetMessagesInput, type Message } from '../schema';
+import { eq, or, and, desc } from 'drizzle-orm';
 
-export async function getMessages(userId: number, input: GetMessagesInput): Promise<Message[]> {
-    // This is a placeholder declaration! Real code should be implemented here.
-    // The goal of this handler is to fetch messages from a conversation:
-    // 1. Verify that user is a participant in the conversation
-    // 2. Query messages for the conversation with pagination (limit/offset)
-    // 3. Order messages by sent_at (newest first or oldest first depending on UI needs)
-    // 4. Mark messages as read for the requesting user
-    // 5. Include sender information if needed
-    return Promise.resolve([
-        {
-            id: 1,
-            conversation_id: input.conversation_id,
-            sender_id: userId === 1 ? 2 : 1, // Mock other participant sending
-            content: 'Hello! This is a placeholder message.',
-            is_read: false,
-            sent_at: new Date(Date.now() - 60000) // 1 minute ago
-        },
-        {
-            id: 2,
-            conversation_id: input.conversation_id,
-            sender_id: userId,
-            content: 'This is my reply message.',
-            is_read: true,
-            sent_at: new Date()
-        }
-    ] as Message[]);
-}
+export const getMessages = async (userId: number, input: GetMessagesInput): Promise<Message[]> => {
+  try {
+    // First verify that user is a participant in the conversation
+    const conversation = await db.select()
+      .from(conversationsTable)
+      .where(
+        and(
+          eq(conversationsTable.id, input.conversation_id),
+          or(
+            eq(conversationsTable.participant1_id, userId),
+            eq(conversationsTable.participant2_id, userId)
+          )
+        )
+      )
+      .execute();
+
+    if (conversation.length === 0) {
+      throw new Error('Conversation not found or user is not a participant');
+    }
+
+    // Query messages for the conversation with pagination
+    const results = await db.select()
+      .from(messagesTable)
+      .where(eq(messagesTable.conversation_id, input.conversation_id))
+      .orderBy(desc(messagesTable.sent_at)) // Newest first
+      .limit(input.limit)
+      .offset(input.offset)
+      .execute();
+
+    // Mark unread messages as read for the requesting user (messages sent by others)
+    const unreadMessageIds = results
+      .filter(msg => !msg.is_read && msg.sender_id !== userId)
+      .map(msg => msg.id);
+
+    if (unreadMessageIds.length > 0) {
+      await db.update(messagesTable)
+        .set({ is_read: true })
+        .where(
+          and(
+            eq(messagesTable.conversation_id, input.conversation_id),
+            eq(messagesTable.is_read, false)
+          )
+        )
+        .execute();
+    }
+
+    // Return messages with updated read status
+    return results.map(message => ({
+      ...message,
+      is_read: message.sender_id === userId ? message.is_read : true // Mark as read for non-sender messages
+    }));
+
+  } catch (error) {
+    console.error('Failed to get messages:', error);
+    throw error;
+  }
+};
